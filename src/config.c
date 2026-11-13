@@ -70,6 +70,7 @@ static const char* const
 config_reserved_vars[] = {
     "PROJECT_BUILD_DIR",
     "SRCS",
+    "CXX_SRCS",
     "ASM_SRCS",
     "OBJS",
     "DEPS",
@@ -80,13 +81,6 @@ config_reserved_vars[] = {
 #define CONFIG_RESERVED_VARS_SIZE (sizeof(config_reserved_vars) / sizeof(config_reserved_vars[0]))
 
 #define CONFIG_EXPAND_MAX_DEPTH 32
-
-
-struct config_req
-{
-    char* key;
-    char* by;
-};
 
 
 static
@@ -230,6 +224,7 @@ config_var_get(struct config_var** vars, size_t* n, const char* key, int create)
     v->key = key;
     v->value = NULL;
     v->layer = -1;
+    v->owned = NULL;
     return v;
 }
 
@@ -456,7 +451,14 @@ config_apply(
         if(e->value)
         {
             char* by = config_entry_origin(layer, e->section);
-            config_add_req(reqs, nreqs, e->value, by);
+
+            /* upload settings are needed only by 'make flash', building must work without them */
+            const int flash = e->section >= 0 && strcmp(layer->ini.sections[e->section].key, "upload") == 0;
+            if(flash)
+                config_add_req(&cfg->flash_reqs, &cfg->nflash_reqs, e->value, by);
+            else
+                config_add_req(reqs, nreqs, e->value, by);
+
             free(by);
         }
         return;
@@ -469,11 +471,27 @@ config_apply(
     }
 
     struct config_var* v = config_var_get(&cfg->vars, &cfg->nvars, e->key, 1);
-    if(e->value)
+    if(!e->value) return;
+
+    if(e->append && v->value)
     {
-        v->value = e->value;
-        v->layer = (int)li;
+        struct mb_buf b;
+        mb_buf_init(&b);
+        mb_buf_printf(&b, "%s %s", v->value, e->value);
+
+        free(v->owned);
+        v->owned = mb_strdup(mb_buf_str(&b));
+        v->value = v->owned;
+        mb_buf_free(&b);
     }
+    else
+    {
+        free(v->owned);
+        v->owned = NULL;
+        v->value = e->value;
+    }
+
+    v->layer = (int)li;
 }
 
 
@@ -490,7 +508,7 @@ config_merge(struct config* cfg)
         for(size_t i = 0; i < ini->nentries; i++)
         {
             const struct ini_entry* e = &ini->entries[i];
-            if(e->section >= 0 || !e->value || strcmp(e->key, "require") == 0) continue;
+            if(e->section >= 0 || !e->value || e->append || strcmp(e->key, "require") == 0) continue;
             config_var_get(&base, &nbase, e->key, 1)->value = e->value;
         }
     }
@@ -537,6 +555,13 @@ config_merge(struct config* cfg)
         free(reqs[i].by);
     }
     free(reqs);
+
+    for(size_t i = 0; i < cfg->nflash_reqs; i++)
+    {
+        if(!mb_config_get(cfg, cfg->flash_reqs[i].key))
+            mb_log(MB_LOG_LEVEL_WARN, "Config", "Key '%s' is required by %s for 'make flash', set it in %s",
+                cfg->flash_reqs[i].key, cfg->flash_reqs[i].by, __config_file);
+    }
 
     return ok;
 }
@@ -650,7 +675,7 @@ mb_config_parse(struct config** pcfg)
     const char* mcu_name = config_ini_get(&user, "mcu_name");
     if(!mcu_name)
     {
-        mb_log(MB_LOG_LEVEL_ERROR, "Config", "mcu_name is not set in '%s'", __config_file);
+        mb_log(MB_LOG_LEVEL_ERROR, "Config", "mcu_name is not set in '%s', set it and run microb again", __config_file);
         mb_ini_free(&user);
         return 0;
     }
@@ -703,6 +728,16 @@ mb_config_free(struct config** cfg)
     {
         for(size_t i = 0; i < (*cfg)->nlayers; i++)
             config_layer_free(&(*cfg)->layers[i]);
+
+        for(size_t i = 0; i < (*cfg)->nflash_reqs; i++)
+        {
+            free((*cfg)->flash_reqs[i].key);
+            free((*cfg)->flash_reqs[i].by);
+        }
+        free((*cfg)->flash_reqs);
+
+        for(size_t i = 0; i < (*cfg)->nvars; i++)
+            free((*cfg)->vars[i].owned);
 
         mb_mcu_db_free(&(*cfg)->db);
         free((*cfg)->vars);

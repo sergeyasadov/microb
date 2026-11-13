@@ -41,6 +41,7 @@ mb_ini_add(struct ini* ini, int section, const char* key, const char* value, int
     e->value = value ? mb_strdup(value) : NULL;
     e->section = section;
     e->line = line;
+    e->append = 0;
 }
 
 
@@ -155,6 +156,16 @@ mb_ini_load(struct ini* ini, const char* path)
 
         *eq = '\0';
         char* key = mb_trim(s);
+
+        int append = 0;
+        const size_t klen = strlen(key);
+        if(klen > 0 && key[klen - 1] == '+')
+        {
+            key[klen - 1] = '\0';
+            key = mb_trim(key);
+            append = 1;
+        }
+
         if(!mb_ini_normalize_key(key))
         {
             mb_log(MB_LOG_LEVEL_WARN, "Ini", "%s:%d: invalid key '%s', line skipped", path, line, key);
@@ -162,6 +173,7 @@ mb_ini_load(struct ini* ini, const char* path)
         }
 
         mb_ini_add(ini, section, key, ini_parse_value(eq + 1, path, line), line);
+        ini->entries[ini->nentries - 1].append = append;
     }
 
     mb_buf_free(&buf);

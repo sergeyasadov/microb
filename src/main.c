@@ -8,7 +8,7 @@
 #include <stdlib.h>
 
 int
-main(void)
+main(int, char**)
 {
     char* cur_path = getcwd(NULL, 0);
     if(!cur_path)

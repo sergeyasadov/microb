@@ -1,61 +1,57 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "logger.h"
 
-#include <stdio.h>
 #include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 
 #define MB_COLOR_RED     "\x1B[31m"
 #define MB_COLOR_GREEN   "\x1B[32m"
 #define MB_COLOR_YELLOW  "\x1B[33m"
-#define MB_COLOR_BLUE    "\x1B[34m"
-#define MB_COLOR_MAGENTA "\x1B[35m"
-#define MB_COLOR_CYAN    "\x1B[36m"
-#define MB_COLOR_WHITE   "\x1B[37m"
-#define MB_COLOR_RESET   "\x1B[0m" 
-#define MB_UNDERLINE     "\x1B[4m"
-#define MB_BOLD     "\x1B[1m"
+#define MB_COLOR_RESET   "\x1B[0m"
+#define MB_BOLD          "\x1B[1m"
 
-#define MB_LOG_TEMPLATE_GENERIC(__data) "[" __data MB_COLOR_RESET "] "
-#define MB_LOG_TEMPLATE_INFO     MB_LOG_TEMPLATE_GENERIC(MB_COLOR_GREEN MB_BOLD "I")
-#define MB_LOG_TEMPLATE_ERROR    MB_LOG_TEMPLATE_GENERIC(MB_COLOR_RED MB_BOLD "E")
-#define MB_LOG_TEMPLATE_WARN     MB_LOG_TEMPLATE_GENERIC(MB_COLOR_YELLOW MB_BOLD "W")
-#define MB_LOG_TEMPLATE_MODULE   "[%12s] "
 
-#define MB_LOG_INFO_PREFIX      MB_LOG_TEMPLATE_INFO    MB_LOG_TEMPLATE_MODULE
-#define MB_LOG_WARN_PREFIX      MB_LOG_TEMPLATE_WARN    MB_LOG_TEMPLATE_MODULE
-#define MB_LOG_ERROR_PREFIX     MB_LOG_TEMPLATE_ERROR   MB_LOG_TEMPLATE_MODULE
+static inline
+int
+log_use_color(void)
+{
+    static int color = -1;
+    if(color < 0)
+    {
+        const char* no_color = getenv("NO_COLOR");
+        color = !(no_color && *no_color) && isatty(fileno(stderr));
+    }
+    return color;
+}
+
 
 void
 mb_log(const enum log_level log_level, const char* module, const char* fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
+    const char* tag;
+    const char* color;
+
     switch(log_level)
     {
-        case MB_LOG_LEVEL_INFO:
-        {
-            printf(MB_LOG_INFO_PREFIX, module);
-            break;
-        }
-
-        case MB_LOG_LEVEL_WARN:
-        {
-            printf(MB_LOG_WARN_PREFIX, module);
-            break;
-        }
-        
-        case MB_LOG_LEVEL_ERROR:
-        {
-            printf(MB_LOG_ERROR_PREFIX, module);
-            break;
-        }
-        default: 
-        {
-            va_end(args);
-            return;
-        }
+        case MB_LOG_LEVEL_INFO:  tag = "I"; color = MB_COLOR_GREEN;  break;
+        case MB_LOG_LEVEL_WARN:  tag = "W"; color = MB_COLOR_YELLOW; break;
+        case MB_LOG_LEVEL_ERROR: tag = "E"; color = MB_COLOR_RED;    break;
+        default: return;
     }
-    vprintf(fmt, args);
-    printf("\n");
+
+    if(log_use_color())
+        fprintf(stderr, "[%s" MB_BOLD "%s" MB_COLOR_RESET "] [%12s] ", color, tag, module);
+    else
+        fprintf(stderr, "[%s] [%12s] ", tag, module);
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
     va_end(args);
+
+    fputc('\n', stderr);
 }

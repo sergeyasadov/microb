@@ -23,6 +23,13 @@ struct config_var
     const char* key;
     const char* value;
     int layer;
+    char* owned; /* value built by 'key += ...', freed with the config */
+};
+
+struct config_req
+{
+    char* key;
+    char* by;
 };
 
 struct config
@@ -34,6 +41,9 @@ struct config
     size_t nlayers;
     struct config_var* vars;
     size_t nvars;
+    /* keys required by the active [upload.*] section: checked by 'make flash', not by microb */
+    struct config_req* flash_reqs;
+    size_t nflash_reqs;
 };
 
 struct config_kv

@@ -16,12 +16,35 @@
 #define GMK_ELF "$(BIN_DIR)/$(PROJECT_NAME).elf"
 
 
+struct gmk_lang
+{
+    const char* ext;
+    const char* cmd;
+    const char* flags;
+};
+
+static const struct gmk_lang
+gmk_langs[] = {
+    {"c",   "$(CC)", "$(CFLAGS)"},
+    {"cpp", "$(if $(CXX),,$(error microb: 'cxx' is not set for this MCU))$(CXX)", "$(CXXFLAGS)"},
+    {"s",   "$(CC)", "$(ASFLAGS)"},
+    {"S",   "$(CC)", "$(ASFLAGS)"},
+};
+
+#define GMK_LANGS_SIZE (sizeof(gmk_langs) / sizeof(gmk_langs[0]))
+
+/* sources of the project, and extra_sources (found by vpath) built into a separate dir */
+static const char* const
+gmk_rule_targets[] = {
+    "$(PROJECT_BUILD_DIR)/%.o: $(SOURCE_DIR)/%.",
+    "$(PROJECT_BUILD_DIR)/extra/%.o: %."
+};
+
+#define GMK_RULE_TARGETS_SIZE (sizeof(gmk_rule_targets) / sizeof(gmk_rule_targets[0]))
+
+
 static const char* const
 gmk_rules =
-    "vpath %.c $(sort $(dir $(EXTRA_SOURCES)))\n"
-    "vpath %.s $(sort $(dir $(EXTRA_SOURCES)))\n"
-    "vpath %.S $(sort $(dir $(EXTRA_SOURCES)))\n"
-    "\n"
     ".PHONY: all dirs build size flash clean\n"
     "all: dirs build\n"
     "\n"
@@ -36,35 +59,36 @@ gmk_rules =
     "\t$(OBJCOPY) $(OBJCOPY_FLAGS) $< $@\n"
     "\n"
     "$(ELF): $(OBJS) $(LINKER_SCRIPT)\n"
-    "\t@mkdir -p $(BIN_DIR)\n"
-    "\t$(CC) $(ARCH_FLAGS) -o $@ $(OBJS) $(LINK_FLAGS) $(LDFLAGS)\n"
-    "\n"
-    "$(PROJECT_BUILD_DIR)/%.o: $(SOURCE_DIR)/%.c\n"
-    "\t@mkdir -p $(PROJECT_BUILD_DIR)\n"
-    "\t$(CC) $(ARCH_FLAGS) $(DEFINES) -I$(INCLUDE_DIR) $(INCLUDES) -MMD -MP $(CFLAGS) -c $< -o $@\n"
-    "\n"
-    "$(PROJECT_BUILD_DIR)/%.o: $(SOURCE_DIR)/%.s\n"
-    "\t@mkdir -p $(PROJECT_BUILD_DIR)\n"
-    "\t$(CC) $(ARCH_FLAGS) $(DEFINES) -I$(INCLUDE_DIR) $(INCLUDES) -MMD -MP $(ASFLAGS) -c $< -o $@\n"
-    "\n"
-    "$(PROJECT_BUILD_DIR)/%.o: $(SOURCE_DIR)/%.S\n"
-    "\t@mkdir -p $(PROJECT_BUILD_DIR)\n"
-    "\t$(CC) $(ARCH_FLAGS) $(DEFINES) -I$(INCLUDE_DIR) $(INCLUDES) -MMD -MP $(ASFLAGS) -c $< -o $@\n"
-    "\n"
-    "$(PROJECT_BUILD_DIR)/%.o: %.c\n"
-    "\t@mkdir -p $(PROJECT_BUILD_DIR)\n"
-    "\t$(CC) $(ARCH_FLAGS) $(DEFINES) -I$(INCLUDE_DIR) $(INCLUDES) -MMD -MP $(CFLAGS) -c $< -o $@\n"
-    "\n"
-    "$(PROJECT_BUILD_DIR)/%.o: %.s\n"
-    "\t@mkdir -p $(PROJECT_BUILD_DIR)\n"
-    "\t$(CC) $(ARCH_FLAGS) $(DEFINES) -I$(INCLUDE_DIR) $(INCLUDES) -MMD -MP $(ASFLAGS) -c $< -o $@\n"
-    "\n"
-    "$(PROJECT_BUILD_DIR)/%.o: %.S\n"
-    "\t@mkdir -p $(PROJECT_BUILD_DIR)\n"
-    "\t$(CC) $(ARCH_FLAGS) $(DEFINES) -I$(INCLUDE_DIR) $(INCLUDES) -MMD -MP $(ASFLAGS) -c $< -o $@\n"
-    "\n"
-    "-include $(DEPS)\n"
+    "\t@mkdir -p $(@D)\n"
+    "\t$(if $(filter %.cpp,$(CXX_SRCS) $(EXTRA_SOURCES)),$(CXX),$(CC)) $(ARCH_FLAGS) -o $@ $(OBJS) $(LINK_FLAGS) $(LDFLAGS)\n"
     "\n";
+
+
+static
+void
+gmk_write_rules(struct mb_buf* mk)
+{
+    for(size_t i = 0; i < GMK_LANGS_SIZE; i++)
+        mb_buf_printf(mk, "vpath %%.%s $(sort $(dir $(EXTRA_SOURCES)))\n", gmk_langs[i].ext);
+    mb_buf_putc(mk, '\n');
+
+    mb_buf_puts(mk, gmk_rules);
+
+    for(size_t t = 0; t < GMK_RULE_TARGETS_SIZE; t++)
+    {
+        for(size_t i = 0; i < GMK_LANGS_SIZE; i++)
+        {
+            mb_buf_printf(mk,
+                "%s%s\n"
+                "\t@mkdir -p $(@D)\n"
+                "\t%s $(ARCH_FLAGS) $(DEFINES) -I$(INCLUDE_DIR) $(INCLUDES) -MMD -MP %s -c $< -o $@\n"
+                "\n",
+                gmk_rule_targets[t], gmk_langs[i].ext, gmk_langs[i].cmd, gmk_langs[i].flags);
+        }
+    }
+
+    mb_buf_puts(mk, "-include $(DEPS)\n\n");
+}
 
 
 struct gmk
@@ -193,6 +217,25 @@ gmk_linker_script(struct gmk* g)
 }
 
 
+/* same basename without dir and extension -> same .o */
+static
+int
+gmk_same_object(const char* a, const char* b)
+{
+    const char* sa = strrchr(a, '/');
+    const char* sb = strrchr(b, '/');
+    a = sa ? sa + 1 : a;
+    b = sb ? sb + 1 : b;
+
+    const char* da = strrchr(a, '.');
+    const char* db = strrchr(b, '.');
+    const size_t la = da ? (size_t)(da - a) : strlen(a);
+    const size_t lb = db ? (size_t)(db - b) : strlen(b);
+
+    return la == lb && strncmp(a, b, la) == 0;
+}
+
+
 static
 int
 gmk_check_extra_sources(const struct gmk* g)
@@ -219,12 +262,31 @@ gmk_check_extra_sources(const struct gmk* g)
     }
     else
     {
+        char** files = NULL;
+        size_t nfiles = 0;
+
         for(char* f = strtok(value.data, " \t"); f; f = strtok(NULL, " \t"))
         {
-            if(mb_is_file(f)) continue;
-            mb_log(MB_LOG_LEVEL_ERROR, "Generator", "File '%s' from extra_sources not found", f);
-            ok = 0;
+            if(!mb_is_file(f))
+            {
+                mb_log(MB_LOG_LEVEL_ERROR, "Generator", "File '%s' from extra_sources not found", f);
+                ok = 0;
+            }
+
+            /* all extra objects live in one dir: $(PROJECT_BUILD_DIR)/extra/<name>.o */
+            for(size_t i = 0; i < nfiles; i++)
+            {
+                if(!gmk_same_object(files[i], f)) continue;
+                mb_log(MB_LOG_LEVEL_ERROR, "Generator", "Files '%s' and '%s' from extra_sources build the same object, rename one",
+                    files[i], f);
+                ok = 0;
+            }
+
+            files = (char**)mb_xrealloc(files, (nfiles + 1) * sizeof(char*));
+            files[nfiles++] = f;
         }
+
+        free(files);
     }
 
     mb_buf_free(&value);
@@ -316,9 +378,10 @@ gmk_write_makefile(struct gmk* g)
     mb_buf_puts(mk,
         "PROJECT_BUILD_DIR = " GMK_PROJECT_BUILD_DIR "\n"
         "SRCS = $(wildcard $(SOURCE_DIR)/*.c)\n"
+        "CXX_SRCS = $(wildcard $(SOURCE_DIR)/*.cpp)\n"
         "ASM_SRCS = $(sort $(wildcard $(SOURCE_DIR)/*.s $(SOURCE_DIR)/*.S))\n"
-        "OBJS = $(patsubst $(SOURCE_DIR)/%.c, $(PROJECT_BUILD_DIR)/%.o, $(SRCS))"
-        " $(addprefix $(PROJECT_BUILD_DIR)/, $(notdir $(addsuffix .o, $(basename $(ASM_SRCS) $(EXTRA_SOURCES)))))\n"
+        "OBJS = $(patsubst $(SOURCE_DIR)/%,$(PROJECT_BUILD_DIR)/%.o,$(basename $(SRCS) $(CXX_SRCS) $(ASM_SRCS)))"
+        " $(addprefix $(PROJECT_BUILD_DIR)/extra/,$(addsuffix .o,$(notdir $(basename $(EXTRA_SOURCES)))))\n"
         "DEPS = $(OBJS:.o=.d)\n"
         "\n"
         "TARGET = " GMK_TARGET "\n"
@@ -327,7 +390,7 @@ gmk_write_makefile(struct gmk* g)
     if(g->ld_var) mb_buf_printf(mk, "LINKER_SCRIPT = %s\n", g->ld_var);
 
     mb_buf_puts(mk, "\n");
-    mb_buf_puts(mk, gmk_rules);
+    gmk_write_rules(mk);
 
     if(g->ld_var)
     {
@@ -346,7 +409,21 @@ gmk_write_makefile(struct gmk* g)
 
     mb_buf_puts(mk, "flash: build\n");
     if(mb_config_get(cfg, "upload_cmd"))
+    {
+        /* keys of the upload method: may be set in microb.ini or on the command line */
+        for(size_t i = 0; i < cfg->nflash_reqs; i++)
+        {
+            const char* key = cfg->flash_reqs[i].key;
+            char* var = mb_config_var_name(key);
+            if(!var) continue;
+
+            mb_buf_printf(mk,
+                "\t$(if $(strip $(%s)),,@echo \"microb: %s is not set - set '%s' in microb.ini or run 'make flash %s=...'\" >&2; exit 1)\n",
+                var, var, key, var);
+            free(var);
+        }
         mb_buf_puts(mk, "\t$(UPLOAD_CMD)\n\n");
+    }
     else
         mb_buf_puts(mk, "\t@echo \"microb: upload_cmd is not set, choose 'upload' in microb.ini\" >&2\n\t@exit 1\n\n");
 

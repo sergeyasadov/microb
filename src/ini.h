@@ -16,6 +16,7 @@ struct ini_entry
     char* value;
     int section;
     int line;
+    int append; /* 'key += value' */
 };
 
 struct ini

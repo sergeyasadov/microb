@@ -58,6 +58,42 @@ db_same_dir(const char* a, const char* b)
 }
 
 
+/*
+ * $MICROB_HOME/mcu, or next to the executable:
+ *   <dir>/mcu                  - build tree (bin/microb + bin/mcu)
+ *   <dir>/../share/microb/mcu  - 'make install' layout
+ */
+static
+char*
+db_system_root(void)
+{
+    const char* home = getenv("MICROB_HOME");
+    if(home && *home) return mb_path_join(home, "mcu");
+
+    char* dir = db_exe_dir();
+    if(!dir)
+    {
+        mb_log(MB_LOG_LEVEL_WARN, "MCU DB", "Can't find the microb executable path, set MICROB_HOME");
+        return NULL;
+    }
+
+    static const char* const candidates[] = {"mcu", "../share/microb/mcu"};
+    char* found = NULL;
+
+    for(size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]) && !found; i++)
+    {
+        char* path = mb_path_join(dir, candidates[i]);
+        if(mb_is_dir(path)) found = path;
+        else free(path);
+    }
+
+    if(!found) found = mb_path_join(dir, candidates[0]);
+
+    free(dir);
+    return found;
+}
+
+
 void
 mb_mcu_db_init(struct mcu_db* db)
 {
@@ -66,26 +102,7 @@ mb_mcu_db_init(struct mcu_db* db)
     if(mb_is_dir(DB_PROJECT_ROOT))
         db->roots[db->nroots++] = mb_strdup(DB_PROJECT_ROOT);
 
-    char* sys = NULL;
-    const char* home = getenv("MICROB_HOME");
-
-    if(home && *home)
-    {
-        sys = mb_path_join(home, "mcu");
-    }
-    else
-    {
-        char* dir = db_exe_dir();
-        if(dir)
-        {
-            sys = mb_path_join(dir, "mcu");
-            free(dir);
-        }
-        else
-        {
-            mb_log(MB_LOG_LEVEL_WARN, "MCU DB", "Can't find the microb executable path, set MICROB_HOME");
-        }
-    }
+    char* sys = db_system_root();
 
     if(!sys) return;
 
