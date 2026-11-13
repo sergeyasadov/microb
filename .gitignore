@@ -4,3 +4,4 @@ test
 .vscode
 .cache/clangd/index/
 compile_commands.json
+.clice/
