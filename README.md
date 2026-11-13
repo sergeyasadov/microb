@@ -1,70 +1,108 @@
 # microb
-MicroBuilder for Embedded devices: generates a `makefile` for AVR and STM32 firmware from a short `microb.ini`.
 
-## Build and install
+Fast generator of build files (Makefile, CMake, xmake) for MCU firmware from one `microb.ini`.
+AVR and STM32 out of the box, any GCC-like toolchain by hand. Linux, macOS, Windows.
 
+## Install
+
+| Command        | Result                                                                   |
+|----------------|--------------------------------------------------------------------------|
+| `make`         | `bin/microb` + `bin/mcu` (MCU database)                                  |
+| `make install` | `$(PREFIX)/bin/microb` + `$(PREFIX)/share/microb/mcu`, `PREFIX=/usr/local` |
+
+## Quick start
+
+Create project
 ```sh
-make            # bin/microb + bin/mcu (MCU database)
-make test       # smoke tests, no toolchains needed
-make install    # $(PREFIX)/bin/microb + $(PREFIX)/share/microb/mcu, PREFIX=/usr/local by default
+mkdir -p blink/src && cd blink
 ```
 
-The MCU database is looked up in `./mcu` of the project first, then in `$MICROB_HOME/mcu`,
-then next to the executable (`<bin>/mcu` or `<bin>/../share/microb/mcu`).
-
-## Usage
-
+Create config
 ```sh
-mkdir blink && cd blink && mkdir src
-microb          # first run creates a microb.ini template
-# set mcu_name (and what the MCU requires) in microb.ini
-microb          # writes makefile
-make            # build
-make flash      # upload
-make size
-make clean
+microb
 ```
 
-Sources: `src/*.c`, `src/*.cpp`, `src/*.s`, `src/*.S`; headers: `include/`.
-Run `microb` again after editing `microb.ini`.
+1. The first run creates a `microb.ini` template.
+2. Set `mcu_name` (plus what the MCU requires, microb tells which keys).
+3. Run `microb` again after each edit of `microb.ini`, then build.
+
+Sources: `src/*.c *.cpp *.s *.S`, headers: `include/`.
+
+## microb.ini
+
+| Group     | Keys                                                                 |
+|-----------|----------------------------------------------------------------------|
+| project   | `project_name` `generator`                                           |
+| MCU       | `mcu_name` `family` `mcu_freq`                                       |
+| dirs      | `source_dir` `include_dir` `build_dir` `bin_dir`                     |
+| toolchain | `compiler` `cxx` `objcopy` `size`                                    |
+| flags     | `defines` `includes` `cflags` `cppflags` `asflags` `ldflags`         |
+| linking   | `linker_script` `extra_sources`                                      |
+| upload    | `upload` `programmer` `port` `baud`                                  |
+
+- `key = value` replaces the MCU default, `key += value` appends to it.
+- Empty values are ignored. Any key of the MCU files can be set.
+- Values: `$(VAR)`, `$(if cond,then[,else])`, environment variables, `$(CURDIR)`.
+
+## Example
 
 ### AVR
-
 ```ini
 mcu_name = atmega328p
 mcu_freq = 16000000UL
-
-# needed only for 'make flash', can also be passed: make flash PORT=/dev/ttyUSB0
 programmer = arduino
 port = /dev/ttyUSB0
+cflags += -g
 ```
 
 ### STM32
-
 ```ini
 mcu_name = stm32f103c8
-cmsis_core = ../CMSIS_5                   # contains CMSIS/Core/Include
-cmsis_device = ../cmsis_device_f1         # contains Include and Source/Templates
-upload = st-flash                         # or openocd, stm32flash
+cmsis_core = ../CMSIS_5
+cmsis_device = ../cmsis_device_f1
+upload = st-flash
 ```
 
-The linker script is generated into `build/<mcu>.ld`; set `linker_script` to use your own.
+## Generators
 
-### Keys
+| `generator` | File             | Build                                            | Flash                                | `compile_commands.json` |
+|-------------|------------------|--------------------------------------------------|--------------------------------------|-------------------------|
+| `makefile`  | `makefile`       | `make`                                           | `make flash`                         | project dir             |
+| `cmake`     | `CMakeLists.txt` | `cmake -B build -G Ninja && cmake --build build` | `cmake --build build --target flash` | `build/`                |
+| `xmake`     | `xmake.lua`      | `xmake`                                          | `xmake build flash`                  | project dir             |
 
-Any key from the MCU files can be overridden in `microb.ini`; it becomes an upper-case makefile variable
-(`cflags` -> `CFLAGS`, aliases: `mcu_name` -> `MCU`, `compiler` -> `CC`, `cppflags` -> `CXXFLAGS`).
-Values may reference other variables: `$(MCU)`, `$(CURDIR)`, environment variables.
+- Several at once: `generator = makefile cmake`; `microb -g cmake` overrides the key.
+- Also: `make size`, `--target size`, `xmake build size`.
+- Upload keys are checked only when flashing and can be passed later:
+  `make flash PORT=...`, `cmake -DPORT=...`, `xmake f --port=...`.
+- Linker script: `build/<mcu>.ld` from the family template, or your own `linker_script`.
+- clangd with a cross compiler: `clangd --query-driver='/path/to/bin/*-gcc,/path/to/bin/*-g++'`.
 
-`key = value` replaces the value, `key += value` appends to the value from the MCU files:
+## MCU lookup
 
-```ini
-cflags += -g -DDEBUG
-```
+1. `mcu/<group>/<mcu>.ini` in the database.
+2. `family` from `microb.ini`.
+3. A family whose `match` fits the name (`family/avr.ini`: `match = atmega* attiny*`).
+4. `microb.ini` only: set `compiler`, `objcopy`, `output_ext`, `arch_flags`...
+
+Database search order: `./mcu`, `$MICROB_HOME/mcu`, `<bin>/mcu`, `<bin>/../share/microb/mcu`.
+A project's `./mcu/family/<name>.ini` replaces the installed one.
 
 ## MCU database
 
-`mcu/<group>/<mcu>.ini` describes one MCU and names its `family`;
-`mcu/family/<family>.ini` holds the shared settings, families may inherit other families.
-`require = key ...` lists keys that must be set; `[upload.<method>]` sections apply when `upload = <method>`,
-their `require` is checked by `make flash`.
+| Family | Coverage                                                                                   |
+|--------|--------------------------------------------------------------------------------------------|
+| AVR    | every `atmega* attiny* atxmega* at90* ata* avr*` by `match`                                |
+| STM32  | 1612 chips: C0 F0 F1 F2 F3 F4 F7 G0 G4 H5 H7 H7RS L0 L1 L4 L5 U0 U3 U5 WB WB0 WBA WL WL3 |
+
+STM32 data: Keil/ST device packs, sizes checked against ST open pin data, startup/system files and
+defines against ST `cmsis-device-*`. RAM is the largest contiguous SRAM block (H7: AXI SRAM).
+
+- `mcu/<group>/<mcu>.ini`: per-chip data and `family`.
+- `mcu/family/<family>.ini`: toolchain, flags, `match`, may inherit another `family`.
+- `require = keys`: must be set. `[upload.<method>]`: applies when `upload = <method>`, its `require` is checked when flashing.
+
+## Windows
+
+microb builds with MinGW-w64 (MSYS2) or `zig cc`. The generated `makefile` needs a POSIX shell
+(MSYS2, Git Bash, xPack Build Tools), CMake and xmake don't.

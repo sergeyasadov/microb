@@ -1,5 +1,5 @@
 CC ?= gcc
-CFLAGS ?= -Wall -Wextra -O3 -std=c99
+CFLAGS ?= -Wall -Wextra -O3 -std=c99 -Wpedantic
 override CFLAGS += $(CDEFS)
 # LDFLAGS ?= -s
 
@@ -16,15 +16,23 @@ SOURCES = \
 	config.c \
 	ini.c \
 	logger.c \
+	platform.c \
 	utils.c \
 	mcu_db.c \
 	template.c \
+	generator.c \
 	generator_makefile.c \
+	generator_cmake.c \
+	generator_xmake.c \
 	main.c
 
 OBJPATHS = $(addprefix $(OBJDIR)/, $(SOURCES:.c=.o))
 DEPPATHS = $(addprefix $(DEPDIR)/, $(SOURCES:.c=.d))
-TARGET = $(BINDIR)/microb
+
+ifeq ($(OS),Windows_NT)
+EXE = .exe
+endif
+TARGET = $(BINDIR)/microb$(EXE)
 
 .PHONY: all mcudb test install uninstall clean
 all: $(TARGET) mcudb
@@ -46,12 +54,12 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR) $(DEPDIR)
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/microb
-	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/microb
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/microb$(EXE)
 	rm -rf $(DESTDIR)$(PREFIX)/share/microb/mcu
 	cp -R mcu $(DESTDIR)$(PREFIX)/share/microb/mcu
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/microb
+	rm -f $(DESTDIR)$(PREFIX)/bin/microb$(EXE)
 	rm -rf $(DESTDIR)$(PREFIX)/share/microb
 
 clean:

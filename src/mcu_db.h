@@ -20,6 +20,8 @@ char* mb_mcu_db_find(const struct mcu_db* db, const char* rel);
 
 char* mb_mcu_db_find_mcu(const struct mcu_db* db, const char* name, char** rel_dir);
 
+char* mb_mcu_db_match_family(const struct mcu_db* db, const char* name, int* ambiguous);
+
 int mb_mcu_db_valid_name(const char* name);
 
 char* mb_mcu_db_roots_str(const struct mcu_db* db);

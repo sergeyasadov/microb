@@ -1,11 +1,9 @@
-#define _POSIX_C_SOURCE 200809L
-
 #include "logger.h"
+#include "platform.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 
 #define MB_COLOR_RED     "\x1B[31m"
@@ -23,7 +21,7 @@ log_use_color(void)
     if(color < 0)
     {
         const char* no_color = getenv("NO_COLOR");
-        color = !(no_color && *no_color) && isatty(fileno(stderr));
+        color = !(no_color && *no_color) && mb_platform_stderr_color();
     }
     return color;
 }

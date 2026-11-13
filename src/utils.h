@@ -19,6 +19,10 @@ char* mb_dirname(const char* path);
 int mb_is_dir(const char* path);
 int mb_is_file(const char* path);
 int mb_mkdir_p(const char* path);
+int mb_is_abs_path(const char* path);
+
+char** mb_split_args(const char* s, size_t* count);
+void mb_strv_free(char** v, size_t count);
 
 
 struct mb_buf

@@ -23,7 +23,7 @@ struct config_var
     const char* key;
     const char* value;
     int layer;
-    char* owned; /* value built by 'key += ...', freed with the config */
+    char* owned;
 };
 
 struct config_req
@@ -36,12 +36,12 @@ struct config
 {
     char* path;
     char* mcu;
+    int mcu_known;
     struct mcu_db db;
     struct config_layer layers[MB_CONFIG_MAX_LAYERS];
     size_t nlayers;
     struct config_var* vars;
     size_t nvars;
-    /* keys required by the active [upload.*] section: checked by 'make flash', not by microb */
     struct config_req* flash_reqs;
     size_t nflash_reqs;
 };
@@ -50,6 +50,7 @@ struct config_kv
 {
     const char* name;
     const char* value;
+    int literal;
 };
 
 struct config* mb_config_init(const char* path);

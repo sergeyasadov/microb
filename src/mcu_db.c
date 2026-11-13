@@ -1,18 +1,12 @@
-#define _POSIX_C_SOURCE 200809L
-
 #include "mcu_db.h"
+#include "ini.h"
 #include "logger.h"
+#include "platform.h"
 #include "utils.h"
 
 #include <ctype.h>
-#include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
-
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#include <stdint.h>
-#endif
 
 
 #define DB_PROJECT_ROOT "mcu"
@@ -23,24 +17,11 @@ static
 char*
 db_exe_dir(void)
 {
-    char* real = NULL;
+    char* exe = mb_platform_exe_path();
+    if(!exe) return NULL;
 
-#if defined(__APPLE__)
-    uint32_t size = 0;
-    _NSGetExecutablePath(NULL, &size);
-
-    char* exe = (char*)mb_xmalloc(size + 1);
-    if(_NSGetExecutablePath(exe, &size) == 0)
-        real = realpath(exe, NULL);
+    char* dir = mb_dirname(exe);
     free(exe);
-#elif defined(__linux__)
-    real = realpath("/proc/self/exe", NULL);
-#endif
-
-    if(!real) return NULL;
-
-    char* dir = mb_dirname(real);
-    free(real);
     return dir;
 }
 
@@ -49,8 +30,8 @@ static
 int
 db_same_dir(const char* a, const char* b)
 {
-    char* ra = realpath(a, NULL);
-    char* rb = realpath(b, NULL);
+    char* ra = mb_platform_realpath(a);
+    char* rb = mb_platform_realpath(b);
     const int same = ra && rb && strcmp(ra, rb) == 0;
     free(ra);
     free(rb);
@@ -58,11 +39,6 @@ db_same_dir(const char* a, const char* b)
 }
 
 
-/*
- * $MICROB_HOME/mcu, or next to the executable:
- *   <dir>/mcu                  - build tree (bin/microb + bin/mcu)
- *   <dir>/../share/microb/mcu  - 'make install' layout
- */
 static
 char*
 db_system_root(void)
@@ -158,28 +134,25 @@ static
 char**
 db_list_dirs(const char* root, size_t* count)
 {
+    size_t n = 0;
+    char** names = mb_platform_list_dir(root, &n);
     *count = 0;
 
-    DIR* d = opendir(root);
-    if(!d) return NULL;
-
-    char** names = NULL;
-    struct dirent* e;
-
-    while((e = readdir(d)) != NULL)
+    for(size_t i = 0; i < n; i++)
     {
-        if(e->d_name[0] == '.' || strcmp(e->d_name, DB_FAMILY_DIR) == 0) continue;
-
-        char* path = mb_path_join(root, e->d_name);
-        const int dir = mb_is_dir(path);
+        char* path = mb_path_join(root, names[i]);
+        const int keep = names[i][0] != '.' && strcmp(names[i], DB_FAMILY_DIR) != 0 && mb_is_dir(path);
         free(path);
-        if(!dir) continue;
 
-        names = (char**)mb_xrealloc(names, (*count + 1) * sizeof(char*));
-        names[(*count)++] = mb_strdup(e->d_name);
+        if(keep) names[(*count)++] = names[i];
+        else free(names[i]);
     }
 
-    closedir(d);
+    if(*count == 0)
+    {
+        free(names);
+        names = NULL;
+    }
 
     if(*count > 1) qsort(names, *count, sizeof(char*), db_cmp_str);
     return names;
@@ -225,6 +198,127 @@ mb_mcu_db_find_mcu(const struct mcu_db* db, const char* name, char** rel_dir)
 
     free(file);
     return found;
+}
+
+
+static
+int
+db_glob(const char* p, const char* s)
+{
+    for(; *p; p++, s++)
+    {
+        if(*p == '*')
+        {
+            for(const char* t = s;; t++)
+            {
+                if(db_glob(p + 1, t)) return 1;
+                if(*t == '\0') return 0;
+            }
+        }
+        if(*s == '\0') return 0;
+        if(*p != '?' && tolower((unsigned char)*p) != tolower((unsigned char)*s)) return 0;
+    }
+    return *s == '\0';
+}
+
+
+static
+const char*
+db_ini_get(const struct ini* ini, const char* key)
+{
+    const char* value = NULL;
+    for(size_t i = 0; i < ini->nentries; i++)
+        if(ini->entries[i].section < 0 && ini->entries[i].value && strcmp(ini->entries[i].key, key) == 0)
+            value = ini->entries[i].value;
+    return value;
+}
+
+
+static
+int
+db_family_matches(const char* path, const char* name)
+{
+    struct ini ini;
+    int found = 0;
+
+    if(mb_ini_load(&ini, path))
+    {
+        const char* patterns = db_ini_get(&ini, "match");
+        if(patterns)
+        {
+            size_t n = 0;
+            char** v = mb_split_args(patterns, &n);
+            for(size_t i = 0; i < n && !found; i++) found = db_glob(v[i], name);
+            mb_strv_free(v, n);
+        }
+    }
+
+    mb_ini_free(&ini);
+    return found;
+}
+
+
+char*
+mb_mcu_db_match_family(const struct mcu_db* db, const char* name, int* ambiguous)
+{
+    *ambiguous = 0;
+
+    char** families = NULL;
+    size_t nfamilies = 0;
+    char** seen = NULL;
+    size_t nseen = 0;
+
+    for(size_t r = 0; r < db->nroots; r++)
+    {
+        char* dir = mb_path_join(db->roots[r], DB_FAMILY_DIR);
+        size_t n = 0;
+        char** files = mb_platform_list_dir(dir, &n);
+        if(n > 1) qsort(files, n, sizeof(char*), db_cmp_str);
+
+        for(size_t i = 0; i < n; i++)
+        {
+            const size_t len = strlen(files[i]);
+            int dup = len <= 4 || strcmp(files[i] + len - 4, ".ini") != 0;
+            for(size_t j = 0; j < nseen && !dup; j++) dup = strcmp(seen[j], files[i]) == 0;
+            if(dup) continue;
+
+            seen = (char**)mb_xrealloc(seen, (nseen + 1) * sizeof(char*));
+            seen[nseen++] = mb_strdup(files[i]);
+
+            char* path = mb_path_join(dir, files[i]);
+            if(db_family_matches(path, name))
+            {
+                families = (char**)mb_xrealloc(families, (nfamilies + 1) * sizeof(char*));
+                families[nfamilies++] = mb_strndup(files[i], len - 4);
+            }
+            free(path);
+        }
+
+        mb_strv_free(files, n);
+        free(dir);
+    }
+
+    mb_strv_free(seen, nseen);
+
+    char* family = NULL;
+    if(nfamilies == 1)
+    {
+        family = families[0];
+        families[0] = NULL;
+    }
+    else if(nfamilies > 1)
+    {
+        struct mb_buf list;
+        mb_buf_init(&list);
+        for(size_t i = 0; i < nfamilies; i++) mb_buf_printf(&list, "%s'%s'", i ? ", " : "", families[i]);
+        mb_log(MB_LOG_LEVEL_ERROR, "MCU DB", "MCU '%s' matches several families (%s), set 'family' in microb.ini",
+            name, mb_buf_str(&list));
+        mb_buf_free(&list);
+        *ambiguous = 1;
+    }
+
+    mb_strv_free(families, nfamilies);
+    return family;
 }
 
 

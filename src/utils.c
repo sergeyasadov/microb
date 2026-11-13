@@ -2,14 +2,13 @@
 
 #include "utils.h"
 #include "logger.h"
+#include "platform.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 
 
 void*
@@ -105,6 +104,8 @@ char*
 mb_dirname(const char* path)
 {
     const char* slash = strrchr(path, '/');
+    const char* backslash = strrchr(path, '\\');
+    if(backslash && (!slash || backslash > slash)) slash = backslash;
     if(!slash) return mb_strdup(".");
     if(slash == path) return mb_strdup("/");
     return mb_strndup(path, (size_t)(slash - path));
@@ -114,16 +115,14 @@ mb_dirname(const char* path)
 int
 mb_is_dir(const char* path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    return mb_platform_is_dir(path);
 }
 
 
 int
 mb_is_file(const char* path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+    return mb_platform_is_file(path);
 }
 
 
@@ -138,10 +137,10 @@ mb_mkdir_p(const char* path)
     for(char* s = p + 1; ok; s++)
     {
         const char c = *s;
-        if(c != '/' && c != '\0') continue;
+        if(c != '/' && c != '\\' && c != '\0') continue;
 
         *s = '\0';
-        if(mkdir(p, 0777) != 0 && errno != EEXIST) ok = 0;
+        if(!mb_platform_mkdir(p) && !mb_platform_is_dir(p)) ok = 0;
         *s = c;
 
         if(c == '\0') break;
@@ -150,6 +149,63 @@ mb_mkdir_p(const char* path)
     ok = ok && mb_is_dir(path);
     free(p);
     return ok;
+}
+
+
+int
+mb_is_abs_path(const char* path)
+{
+    if(path[0] == '/' || path[0] == '\\') return 1;
+    return isalpha((unsigned char)path[0]) && path[1] == ':' && (path[2] == '/' || path[2] == '\\');
+}
+
+
+char**
+mb_split_args(const char* s, size_t* count)
+{
+    char** args = NULL;
+    *count = 0;
+
+    struct mb_buf arg;
+    mb_buf_init(&arg);
+
+    const char* p = s;
+    for(;;)
+    {
+        while(*p == ' ' || *p == '\t' || *p == '\n') p++;
+        if(*p == '\0') break;
+
+        mb_buf_reset(&arg);
+        mb_buf_putn(&arg, "", 0);
+
+        char quote = 0;
+        for(; *p; p++)
+        {
+            if(quote)
+            {
+                if(*p == quote) quote = 0;
+                else if(quote == '"' && *p == '\\' && (p[1] == '"' || p[1] == '\\')) mb_buf_putc(&arg, *++p);
+                else mb_buf_putc(&arg, *p);
+            }
+            else if(*p == '"' || *p == '\'') quote = *p;
+            else if(*p == ' ' || *p == '\t' || *p == '\n') break;
+            else mb_buf_putc(&arg, *p);
+        }
+
+        args = (char**)mb_xrealloc(args, (*count + 1) * sizeof(char*));
+        args[(*count)++] = mb_strdup(mb_buf_str(&arg));
+    }
+
+    mb_buf_free(&arg);
+    return args;
+}
+
+
+void
+mb_strv_free(char** v, size_t count)
+{
+    for(size_t i = 0; i < count; i++) free(v[i]);
+    free(v);
 }
 
 
@@ -311,9 +367,9 @@ mb_write_file_atomic(const char* path, const char* data, size_t len)
     int ok = fwrite(data, 1, len, f) == len;
     ok = (fclose(f) == 0) && ok;
 
-    if(ok && rename(tmp, path) != 0)
+    if(ok && !mb_platform_replace_file(tmp, path))
     {
-        mb_log(MB_LOG_LEVEL_ERROR, "File", "Can't rename '%s' to '%s': %s", tmp, path, strerror(errno));
+        mb_log(MB_LOG_LEVEL_ERROR, "File", "Can't replace '%s' with '%s'", path, tmp);
         ok = 0;
     }
     else if(!ok)

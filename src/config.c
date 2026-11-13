@@ -11,29 +11,48 @@
 
 static const char* const __config_file = "microb.ini";
 
-static const char* const
-config_template_keys[] = {
-    "project_name",
-    "mcu_name",
-    "mcu_freq",
-    "compiler",
-    "objcopy",
-    "uploader",
-    "programmer",
-    "build_dir",
-    "bin_dir",
-    "include_dir",
-    "source_dir",
-    "baud",
-    "port",
-    "cflags",
-    "ldflags",
-    "cppflags",
-    "upload",
-    "linker_script"
+struct config_template_key
+{
+    const char* key;
+    int append;
 };
 
-#define CONFIG_TEMPLATE_KEYS_SIZE (sizeof(config_template_keys) / sizeof(config_template_keys[0]))
+static const struct config_template_key
+config_template[] = {
+    {"project_name", 0},
+    {"generator", 0},
+    {NULL, 0},
+    {"mcu_name", 0},
+    {"family", 0},
+    {"mcu_freq", 0},
+    {NULL, 0},
+    {"source_dir", 0},
+    {"include_dir", 0},
+    {"build_dir", 0},
+    {"bin_dir", 0},
+    {NULL, 0},
+    {"compiler", 0},
+    {"cxx", 0},
+    {"objcopy", 0},
+    {"size", 0},
+    {NULL, 0},
+    {"defines", 1},
+    {"includes", 1},
+    {"cflags", 1},
+    {"cppflags", 1},
+    {"asflags", 1},
+    {"ldflags", 1},
+    {NULL, 0},
+    {"linker_script", 0},
+    {"extra_sources", 1},
+    {NULL, 0},
+    {"upload", 0},
+    {"programmer", 0},
+    {"port", 0},
+    {"baud", 0}
+};
+
+#define CONFIG_TEMPLATE_SIZE (sizeof(config_template) / sizeof(config_template[0]))
 
 static const char* const
 config_defaults[][2] = {
@@ -60,17 +79,42 @@ config_aliases[][2] = {
 static const char* const
 config_hidden_keys[] = {
     "family",
+    "match",
     "require",
-    "linker_template"
+    "linker_template",
+    "generator"
 };
 
 #define CONFIG_HIDDEN_KEYS_SIZE (sizeof(config_hidden_keys) / sizeof(config_hidden_keys[0]))
+
+static const char* const
+config_generator_keys[] = {
+    "cxx",
+    "size",
+    "output_ext",
+    "objcopy_flags",
+    "size_flags",
+    "arch_flags",
+    "defines",
+    "includes",
+    "asflags",
+    "link_flags",
+    "extra_sources",
+    "upload_cmd"
+};
+
+#define CONFIG_GENERATOR_KEYS_SIZE (sizeof(config_generator_keys) / sizeof(config_generator_keys[0]))
 
 static const char* const
 config_reserved_vars[] = {
     "PROJECT_BUILD_DIR",
     "SRCS",
     "CXX_SRCS",
+    "MICROB_JSON",
+    "MICROB_SQ",
+    "MICROB_CDB",
+    "MICROB_CDB_C",
+    "MICROB_CDB_CXX",
     "ASM_SRCS",
     "OBJS",
     "DEPS",
@@ -89,6 +133,16 @@ config_in_list(const char* key, const char* const* list, size_t size)
 {
     for(size_t i = 0; i < size; i++)
         if(strcmp(key, list[i]) == 0) return 1;
+    return 0;
+}
+
+
+static
+int
+config_is_template_key(const char* key)
+{
+    for(size_t i = 0; i < CONFIG_TEMPLATE_SIZE; i++)
+        if(config_template[i].key && strcmp(key, config_template[i].key) == 0) return 1;
     return 0;
 }
 
@@ -172,15 +226,18 @@ mb_config_init(const char* path)
         return cfg;
     }
 
-    mb_log(MB_LOG_LEVEL_INFO, "Config", "Create new config file '%s'", __config_file);
-
-    for(size_t i = 0; i < CONFIG_TEMPLATE_KEYS_SIZE; i++)
+    for(size_t i = 0; i < CONFIG_TEMPLATE_SIZE; i++)
     {
-        fprintf(cfg_file, "%s = \"\"\n",  config_template_keys[i]);
-        mb_log(MB_LOG_LEVEL_INFO, "Config", "Push key '%s'", config_template_keys[i]);
+        const struct config_template_key* t = &config_template[i];
+        if(t->key)
+            fprintf(cfg_file, "%s %s \"\"\n", t->key, t->append ? "+=" : "=");
+        else
+            fputc('\n', cfg_file);
     }
 
     fclose(cfg_file);
+
+    mb_log(MB_LOG_LEVEL_INFO, "Config", "Created template '%s'", __config_file);
 
     return cfg;
 }
@@ -267,44 +324,81 @@ config_layer_free(struct config_layer* layer)
 
 
 static
-size_t
-config_load_chain(struct config* cfg, struct config_layer* chain)
+int
+config_load_chain(struct config* cfg, const struct ini* user, struct config_layer* chain, size_t* pn)
 {
-    char* rel_dir = NULL;
-    char* path = mb_mcu_db_find_mcu(&cfg->db, cfg->mcu, &rel_dir);
-
-    if(!path)
-    {
-        char* roots = mb_mcu_db_roots_str(&cfg->db);
-        mb_log(MB_LOG_LEVEL_ERROR, "Config", "MCU '%s' not found in MCU database (%s)", cfg->mcu, roots);
-        free(roots);
-        return 0;
-    }
-
-    mb_log(MB_LOG_LEVEL_INFO, "Config", "MCU '%s': '%s'", cfg->mcu, path);
+    *pn = 0;
 
     size_t n = 0;
-    config_layer_set(&chain[n], path, rel_dir);
-    free(rel_dir);
+    int ok = 1;
+    char* matched = NULL;
+    const char* parent = NULL;
+    const char* origin = __config_file;
 
-    int ok = mb_ini_load(&chain[n].ini, path);
-    free(path);
-    if(!ok)
+    char* rel_dir = NULL;
+    char* path = mb_mcu_db_find_mcu(&cfg->db, cfg->mcu, &rel_dir);
+    const char* user_family = config_ini_get(user, "family");
+
+    if(path)
     {
-        mb_log(MB_LOG_LEVEL_ERROR, "Config", "Can't read '%s'", chain[n].name);
-        config_layer_free(&chain[n]);
-        return 0;
-    }
-    n++;
+        mb_log(MB_LOG_LEVEL_INFO, "Config", "MCU '%s': '%s'", cfg->mcu, path);
 
-    const char* parent = config_ini_get(&chain[0].ini, "family");
+        config_layer_set(&chain[n], path, rel_dir);
+        free(rel_dir);
+
+        ok = mb_ini_load(&chain[n].ini, path);
+        free(path);
+        if(!ok)
+        {
+            mb_log(MB_LOG_LEVEL_ERROR, "Config", "Can't read '%s'", chain[n].name);
+            config_layer_free(&chain[n]);
+            return 0;
+        }
+
+        cfg->mcu_known = 1;
+        parent = config_ini_get(&chain[n].ini, "family");
+        n++;
+    }
+    else if(user_family)
+    {
+        mb_log(MB_LOG_LEVEL_INFO, "Config", "MCU '%s' is not in the MCU database, family '%s' from %s",
+            cfg->mcu, user_family, __config_file);
+        parent = user_family;
+    }
+    else
+    {
+        int ambiguous = 0;
+        matched = mb_mcu_db_match_family(&cfg->db, cfg->mcu, &ambiguous);
+        if(ambiguous) return 0;
+
+        if(matched)
+        {
+            mb_log(MB_LOG_LEVEL_INFO, "Config", "MCU '%s': family '%s' by its 'match'", cfg->mcu, matched);
+            parent = matched;
+            origin = "match";
+        }
+        else
+        {
+            char* roots = mb_mcu_db_roots_str(&cfg->db);
+            if(config_ini_get(user, "compiler"))
+                mb_log(MB_LOG_LEVEL_INFO, "Config", "MCU '%s' is not in the MCU database (%s): using %s only",
+                    cfg->mcu, roots, __config_file);
+            else
+                mb_log(MB_LOG_LEVEL_WARN, "Config",
+                    "MCU '%s' is not in the MCU database (%s) and no family matches it: "
+                    "set 'family' or the toolchain keys (compiler, objcopy, output_ext, ...) in %s",
+                    cfg->mcu, roots, __config_file);
+            free(roots);
+            return 1;
+        }
+    }
 
     while(parent)
     {
         char* family = mb_strdup(parent);
         mb_str_lower(family);
 
-        const char* child = chain[n - 1].name;
+        const char* child = n ? chain[n - 1].name : origin;
 
         if(!mb_mcu_db_valid_name(family))
         {
@@ -332,7 +426,7 @@ config_load_chain(struct config* cfg, struct config_layer* chain)
             ok = 0;
         }
 
-        for(size_t i = 1; ok && i < n; i++)
+        for(size_t i = 0; ok && i < n; i++)
         {
             if(strcmp(chain[i].name, fpath) == 0)
             {
@@ -364,13 +458,16 @@ config_load_chain(struct config* cfg, struct config_layer* chain)
         if(!ok)
         {
             for(size_t i = 0; i < n; i++) config_layer_free(&chain[i]);
+            free(matched);
             return 0;
         }
 
         parent = config_ini_get(&chain[n - 1].ini, "family");
     }
 
-    return n;
+    free(matched);
+    *pn = n;
+    return 1;
 }
 
 
@@ -452,7 +549,6 @@ config_apply(
         {
             char* by = config_entry_origin(layer, e->section);
 
-            /* upload settings are needed only by 'make flash', building must work without them */
             const int flash = e->section >= 0 && strcmp(layer->ini.sections[e->section].key, "upload") == 0;
             if(flash)
                 config_add_req(&cfg->flash_reqs, &cfg->nflash_reqs, e->value, by);
@@ -466,7 +562,8 @@ config_apply(
 
     if(user && strcmp(e->key, "family") == 0)
     {
-        mb_log(MB_LOG_LEVEL_WARN, "Config", "%s:%d: 'family' is set by the MCU file, ignored", layer->name, e->line);
+        if(cfg->mcu_known && e->value)
+            mb_log(MB_LOG_LEVEL_WARN, "Config", "%s:%d: 'family' is set by the MCU file, ignored", layer->name, e->line);
         return;
     }
 
@@ -559,7 +656,7 @@ config_merge(struct config* cfg)
     for(size_t i = 0; i < cfg->nflash_reqs; i++)
     {
         if(!mb_config_get(cfg, cfg->flash_reqs[i].key))
-            mb_log(MB_LOG_LEVEL_WARN, "Config", "Key '%s' is required by %s for 'make flash', set it in %s",
+            mb_log(MB_LOG_LEVEL_WARN, "Config", "Key '%s' is required by %s for flashing, set it in %s",
                 cfg->flash_reqs[i].key, cfg->flash_reqs[i].by, __config_file);
     }
 
@@ -635,7 +732,8 @@ config_check_unknown(const struct config* cfg)
 
         char* var = mb_config_var_name(key);
 
-        int known = !var || config_in_list(key, config_template_keys, CONFIG_TEMPLATE_KEYS_SIZE) ||
+        int known = !var || config_is_template_key(key) ||
+            config_in_list(key, config_generator_keys, CONFIG_GENERATOR_KEYS_SIZE) ||
             strcmp(key, "require") == 0;
 
         for(size_t li = 0; li + 1 < cfg->nlayers && !known; li++)
@@ -695,8 +793,8 @@ mb_config_parse(struct config** pcfg)
     struct config_layer chain[MB_CONFIG_MAX_FAMILY_DEPTH + 1];
     memset(chain, 0, sizeof(chain));
 
-    const size_t nchain = config_load_chain(cfg, chain);
-    if(nchain == 0)
+    size_t nchain = 0;
+    if(!config_load_chain(cfg, &user, chain, &nchain))
     {
         mb_ini_free(&user);
         return 0;
@@ -762,8 +860,17 @@ config_valid_var_name(const char* s, size_t n)
 
 static
 const char*
-config_lookup(const struct config* cfg, const struct config_kv* extra, const char* name)
+config_lookup(const struct config* cfg, const struct config_kv* extra, const char* name, int* literal)
 {
+    *literal = 0;
+
+    for(; extra && extra->name; extra++)
+    {
+        if(strcmp(extra->name, name) != 0) continue;
+        *literal = extra->literal;
+        return extra->value;
+    }
+
     for(size_t i = 0; i < cfg->nvars; i++)
     {
         const struct config_var* v = &cfg->vars[i];
@@ -774,12 +881,84 @@ config_lookup(const struct config* cfg, const struct config_kv* extra, const cha
         return env ? env : "";
     }
 
-    for(; extra && extra->name; extra++)
-        if(strcmp(extra->name, name) == 0) return extra->value;
-
     if(strcmp(name, "CURDIR") == 0) return cfg->path;
 
     return getenv(name);
+}
+
+
+static int config_expand_rec(const struct config*, const struct config_kv*, const char*, struct mb_buf*, struct mb_buf*, int);
+
+
+static
+int
+config_expand_n(
+    const struct config* cfg,
+    const struct config_kv* extra,
+    const char* s,
+    size_t n,
+    struct mb_buf* out,
+    struct mb_buf* err,
+    int depth)
+{
+    char* copy = mb_strndup(s, n);
+    const int rc = config_expand_rec(cfg, extra, copy, out, err, depth);
+    free(copy);
+    return rc;
+}
+
+
+static
+int
+config_expand_if(
+    const struct config* cfg,
+    const struct config_kv* extra,
+    const char* args,
+    const char* end,
+    struct mb_buf* out,
+    struct mb_buf* err,
+    int depth)
+{
+    const char* arg[3] = {args, NULL, NULL};
+    const char* arg_end[3] = {end, NULL, NULL};
+    size_t nargs = 1;
+    int level = 0;
+
+    for(const char* c = args; c < end; c++)
+    {
+        if(*c == '(' || *c == '{') level++;
+        else if(*c == ')' || *c == '}') level--;
+        else if(*c == ',' && level == 0 && nargs < 3)
+        {
+            arg_end[nargs - 1] = c;
+            arg[nargs] = c + 1;
+            arg_end[nargs] = end;
+            nargs++;
+        }
+    }
+
+    if(nargs < 2)
+    {
+        mb_buf_printf(err, "'$(if ...)' needs at least 2 arguments");
+        return 0;
+    }
+
+    struct mb_buf cond;
+    mb_buf_init(&cond);
+    int rc = config_expand_n(cfg, extra, arg[0], (size_t)(arg_end[0] - arg[0]), &cond, err, depth + 1);
+
+    if(rc == 1)
+    {
+        const char* c = mb_buf_str(&cond);
+        while(*c == ' ' || *c == '\t') c++;
+
+        const size_t pick = *c ? 1 : 2;
+        if(pick < nargs)
+            rc = config_expand_n(cfg, extra, arg[pick], (size_t)(arg_end[pick] - arg[pick]), out, err, depth + 1);
+    }
+
+    mb_buf_free(&cond);
+    return rc;
 }
 
 
@@ -849,12 +1028,21 @@ config_expand_rec(
         const size_t n = (size_t)(q - start);
         if(!config_valid_var_name(start, n))
         {
+            if(n > 3 && strncmp(start, "if", 2) == 0 && (start[2] == ' ' || start[2] == '\t'))
+            {
+                const int rc = config_expand_if(cfg, extra, start + 3, q, out, err, depth);
+                if(rc != 1) return rc;
+                p = q + 1;
+                continue;
+            }
+
             mb_buf_printf(err, "unsupported make construct '%.*s'", (int)(q - p + 1), p);
             return -1;
         }
 
         char* name = mb_strndup(start, n);
-        const char* value = config_lookup(cfg, extra, name);
+        int literal = 0;
+        const char* value = config_lookup(cfg, extra, name, &literal);
 
         if(!value)
         {
@@ -864,8 +1052,15 @@ config_expand_rec(
         }
         free(name);
 
-        const int rc = config_expand_rec(cfg, extra, value, out, err, depth + 1);
-        if(rc != 1) return rc;
+        if(literal)
+        {
+            mb_buf_puts(out, value);
+        }
+        else
+        {
+            const int rc = config_expand_rec(cfg, extra, value, out, err, depth + 1);
+            if(rc != 1) return rc;
+        }
 
         p = q + 1;
     }
@@ -885,5 +1080,5 @@ mb_config_expand(
     mb_buf_reset(out);
     mb_buf_putn(out, "", 0);
     mb_buf_reset(err);
-    return config_expand_rec(cfg, extra, s, out, err, 0);
+    return config_expand_rec(cfg, extra, s ? s : "", out, err, 0);
 }
