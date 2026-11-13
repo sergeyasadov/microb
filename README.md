@@ -3,12 +3,21 @@
 Fast generator of build files (Makefile, CMake, xmake) for MCU firmware from one `microb.ini`.
 AVR and STM32 out of the box, any GCC-like toolchain by hand. Linux, macOS, Windows.
 
-## Install
+## Build and Install
 
-| Command        | Result                                                                   |
-|----------------|--------------------------------------------------------------------------|
-| `make`         | `bin/microb` + `bin/mcu` (MCU database)                                  |
-| `make install` | `$(PREFIX)/bin/microb` + `$(PREFIX)/share/microb/mcu`, `PREFIX=/usr/local` |
+### Build
+```sh
+git clone https://github.com/sergeyasadov/microb.git
+cd microb
+make
+```
+
+### Install
+> [!NOTE]
+> `$(PREFIX)/bin/microb` + `$(PREFIX)/share/microb/mcu`, `PREFIX=/usr/local`
+```sh
+make install
+```
 
 ## Quick start
 
@@ -22,9 +31,10 @@ Create config
 microb
 ```
 
-1. The first run creates a `microb.ini` template.
-2. Set `mcu_name` (plus what the MCU requires, microb tells which keys).
-3. Run `microb` again after each edit of `microb.ini`, then build.
+> [!NOTE]
+> 1. The first run creates a `microb.ini` template.
+> 2. Set `mcu_name` (plus what the MCU requires, microb tells which keys).
+> 3. Run `microb` again after each edit of `microb.ini`, then build.
 
 Sources: `src/*.c *.cpp *.s *.S`, headers: `include/`.
 
